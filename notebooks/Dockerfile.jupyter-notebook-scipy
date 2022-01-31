@@ -1,0 +1,12 @@
+FROM jupyter/scipy-notebook:702d2f6a3eaa
+
+ARG SCOSPY_VERSION=1.1.2
+
+RUN pip install ipyleaflet==0.9.0
+RUN pip install https://s3.us-east-2.amazonaws.com/scospy-repository/scos-$SCOSPY_VERSION.tar.gz
+RUN jupyter nbextension install --py --symlink --sys-prefix ipyleaflet \
+ && jupyter nbextension enable --py --sys-prefix ipyleaflet \
+ && jupyter labextension install jupyter-leaflet \
+ && jupyter labextension install @jupyter-widgets/jupyterlab-manager
+
+RUN conda install jupyter_dashboards -c conda-forge

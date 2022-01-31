@@ -1,0 +1,34 @@
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: jupyterhub
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: {{ .Values.ingress.scheme }}
+    alb.ingress.kubernetes.io/tags: scos.delete.on.teardown=true
+    alb.ingress.kubernetes.io/healthcheck-path: /hub/login
+    alb.ingress.kubernetes.io/subnets: {{ .Values.ingress.subnets }}
+    alb.ingress.kubernetes.io/security-groups: {{ .Values.ingress.security_groups }}
+    alb.ingress.kubernetes.io/certificate-arn: {{ .Values.ingress.certificate_arn }}
+    alb.ingress.kubernetes.io/actions.redirect: '{"Type": "redirect", "RedirectConfig":{"Protocol": "HTTPS", "Port": "443", "StatusCode": "HTTP_301"}}'
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+spec:
+  backend:
+    serviceName: proxy-public
+    servicePort: {{ .Values.ingress.port  }}
+  rules:
+  - host: jupyter.smartcolumbusos.com
+    http:
+      paths:
+      - path: /*
+        backend:
+          serviceName: redirect
+          servicePort: use-annotation
+  - host: jupyter.{{ .Values.ingress.dns_zone }}
+    http:
+      paths:
+      - path: /*
+        backend:
+          serviceName: redirect
+          servicePort: use-annotation

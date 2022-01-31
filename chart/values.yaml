@@ -1,0 +1,106 @@
+jupyterhub:
+  proxy:
+    secretToken: ""
+    chp:
+      resources:
+        requests:
+          cpu: 200m
+          memory: 512Mi
+        limit:
+          cpu: 750m
+          memory: 512Mi
+    service:
+      type: NodePort
+      labels: {}
+      annotations: {}
+      nodePorts:
+        http: 30003
+        https: 30004
+  prePuller:
+    hook:
+      enabled: false
+    continuous:
+      enabled: false
+      # SMRT-538 This was disabled because we couldn't apply a toleration in order to run it on the appropriate worker group.
+      # The jupyterhub chart will support taints/tolerations in 0.8 and we should use the continuous pre puller when we switch to 0.8.
+  auth:
+    type: github
+    github:
+      clientId: ""
+      clientSecret: ""
+      callbackUrl: ""
+      org_whitelist:
+        - "SmartColumbusOS"
+        - "SmartColumbusBeta"
+    scopes:
+      - "read:user"
+      - "read:org"
+  singleuser:
+    defaultUrl: "/lab"
+    #Jupyterhub's spawner wants its own snowflake format for resources
+    memory:
+      limit: 1000M
+      guarantee: 1000M
+    cpu:
+      limit: .75
+      guarantee: .1
+    imagePullSecret:
+      enabled: true
+      registry: ""
+      username: AWS
+      email: " "
+      password: ""
+    image:
+      name: 199837183662.dkr.ecr.us-east-2.amazonaws.com/scos/leaflet-notebook
+      tag: latest
+  hub:
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limit:
+        cpu: 750m
+        memory: 512Mi
+    extraConfig:
+      spawner-cmd: |
+        c.Spawner.cmd: ['jupyter-labhub']
+        c.KubeSpawner.singleuser_extra_pod_config = {
+          'tolerations': [
+              {
+                'key': 'scos.run.jupyterhub',
+                'operator': 'Equal',
+                'value': 'true',
+                'effect': 'NoExecute'
+              }
+            ],
+          'affinity': {
+            'nodeAffinity': {
+              'requiredDuringSchedulingIgnoredDuringExecution': {
+                'nodeSelectorTerms': [
+                  {
+                    'matchExpressions': [
+                      {
+                        'key': 'scos.run.jupyterhub',
+                        'operator': 'In',
+                        'values': ['true']
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+          }
+
+ingress:
+  port: 80
+  enabled: true
+  scheme: ""
+  subnets: ""
+  security_groups: "" #Load balancer Security Group
+  dns_zone: ""
+  certificate_arn: ""
+
+external_dns:
+  enabled: false
+  tag: v0.5.5

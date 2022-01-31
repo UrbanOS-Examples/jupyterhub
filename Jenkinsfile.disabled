@@ -1,0 +1,155 @@
+library(
+    identifier: 'pipeline-lib@4.3.0',
+    retriever: modernSCM([$class: 'GitSCMSource',
+                          remote: 'https://github.com/SmartColumbusOS/pipeline-lib',
+                          credentialsId: 'jenkins-github-user'])
+)
+
+properties([
+    pipelineTriggers([scos.dailyBuildTrigger()]),
+])
+
+def dockerUser
+def dockerPass
+def server
+def notebookImage
+def doStageIf = scos.&doStageIf
+def doStageIfRelease = doStageIf.curry(scos.changeset.isRelease)
+def doStageUnlessRelease = doStageIf.curry(!scos.changeset.isRelease && !scos.changeset.isHotfix)
+def doStageIfPromoted = doStageIf.curry(scos.changeset.isMaster)
+def doStageIfHotfix = doStageIf.curry(scos.changeset.isHotfix)
+
+node('infrastructure') {
+    ansiColor('xterm') {
+
+        scos.doCheckoutStage()
+
+        doStageUnlessRelease('Build Jupyter Notebook - SciPy') {
+            dir('notebooks') {
+                notebookImage = docker.build("scos/leaflet-notebook:${env.GIT_COMMIT_HASH}", "-f Dockerfile.jupyter-notebook-scipy .")
+            }
+        }
+
+        doStageUnlessRelease('Deploy to Dev') {
+            scos.withDockerRegistry {
+                notebookImage.push()
+                notebookImage.push('latest')
+            }
+            deployJupyterTo('dev')
+        }
+
+        doStageIfPromoted('Deploy to Staging') {
+            def environment = 'staging'
+
+            deployJupyterTo(environment)
+
+            scos.applyAndPushGitHubTag(environment)
+
+            scos.withDockerRegistry {
+                notebookImage.push(environment)
+            }
+        }
+
+        doStageIfHotfix("Publish hotfix images") {
+            def notebook
+
+            dir('notebooks') {
+                notebook = docker.build("scos/leaflet-notebook:${env.GIT_COMMIT_HASH}", "-f Dockerfile.jupyter-notebook-scipy .")
+            }
+
+            scos.withDockerRegistry {
+                notebook.push()
+            }
+        }
+
+        doStageIfRelease('Deploy to Production') {
+            def releaseTag = env.BRANCH_NAME
+            def promotionTag = 'prod'
+
+            deployJupyterTo('prod')
+
+            scos.applyAndPushGitHubTag(promotionTag)
+
+            scos.withDockerRegistry {
+                notebookImage = scos.pullImageFromDockerRegistry("scos/leaflet-notebook", env.GIT_COMMIT_HASH)
+                notebookImage.push(releaseTag)
+                notebookImage.push(promotionTag)
+            }
+        }
+    }
+}
+
+def deployJupyterTo(environment) {
+    scos.withEksCredentials(environment) {
+        withCredentials([string(credentialsId: "jupyterhub-${environment}", variable: 'DOCKER_ARGS')]) {
+            def isProd = "prod" == environment
+            def tag = env.GIT_COMMIT_HASH
+            def github_creds = DOCKER_ARGS.split()
+            def login = sh(script: 'aws ecr get-login --no-include-email --region us-east-2', returnStdout: true).split()
+            def terraformOutputs = scos.terraformOutput(environment)
+            def subnets = terraformOutputs.public_subnets.value.join(',')
+            def albToClusterSG = terraformOutputs.allow_all_security_group.value
+            def certificateARN = isProd ? terraformOutputs.root_tls_certificate_arn.value : terraformOutputs.tls_certificate_arn.value
+            def scheme = isProd ? 'internet-facing' : 'internal'
+            def callbackUrl = isProd ? "https://jupyter.smartcolumbusos.com" : "https://jupyter.${environment}.internal.smartcolumbusos.com"
+            dockerPass = login[5]
+            server = login[6]
+            secretToken = github_creds[1]
+            clientId = github_creds[3]
+            clientSecret = github_creds[5]
+
+            sh("""#!/bin/bash
+                set -e
+
+                function tiller_error {
+                    echo "[ERROR] Tiller pod not running"
+                    exit 1
+                }
+
+                function validate_tiller {
+                    (kubectl get pods --namespace kube-system -l name='tiller' | grep -q Running) || tiller_error
+                }
+
+                export DNS_ZONE="${environment}.internal.smartcolumbusos.com"
+                export LEAFLET_NOTEBOOK_TAG="${tag}"
+                export CALLBACK_URL="${callbackUrl}/hub/oauth_callback"
+                export DOCKER_PASSWD="${dockerPass}"
+                export SERVER="${server}"
+                export SCOSPY_ENV="${environment}"
+                export SUBNETS="${subnets}"
+                export SECURITY_GROUP="${albToClusterSG}"
+                export SCHEME="${scheme}"
+                export CERTIFICATE_ARN="${certificateARN}"
+                export "${secretToken}"
+                export "${clientId}"
+                export "${clientSecret}"
+
+                validate_tiller
+
+                helm init --client-only
+
+                helm repo add jupyterhub https://jupyterhub.github.io/helm-chart
+                helm repo update
+                helm dependency build chart
+
+                helm upgrade --install jupyterhub ./chart \
+                    --namespace=jupyterhub \
+                    --set jupyterhub.proxy.secretToken="\${SECRET_TOKEN}" \
+                    --set jupyterhub.auth.github.clientId="\${CLIENT_ID}" \
+                    --set jupyterhub.auth.github.clientSecret="\${CLIENT_SECRET}" \
+                    --set jupyterhub.auth.github.callbackUrl="\${CALLBACK_URL}" \
+                    --set jupyterhub.singleuser.image.tag="\${LEAFLET_NOTEBOOK_TAG}" \
+                    --set jupyterhub.singleuser.extraEnv.SCOSPY_ENVIRONMENT="\${SCOSPY_ENV}" \
+                    --set jupyterhub.singleuser.imagePullSecret.registry="\${SERVER}" \
+                    --set jupyterhub.singleuser.imagePullSecret.password="\${DOCKER_PASSWD}" \
+                    --set ingress.scheme="\${SCHEME}" \
+                    --set ingress.subnets="\${SUBNETS//,/\\\\,}" \
+                    --set ingress.security_groups="\${SECURITY_GROUP}" \
+                    --set ingress.dns_zone="\${DNS_ZONE}" \
+                    --set ingress.certificate_arn="\${CERTIFICATE_ARN}" \
+                    --timeout=600 \
+                    --wait
+            """.trim())
+        }
+    }
+}
